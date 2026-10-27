@@ -22,7 +22,12 @@ const PIX_PADRAO = {
   chave: "macarronadadocatao@gmail.com",
   copia: "00020101021126500014br.gov.bcb.pix0128macarronadadocatao@gmail.com5204000053039865802BR5918LEONARDO C PEREIRA6009BOA VISTA62070503***63041602",
 };
-const CONFIGS = ["cardapio", "entregador", "pix", "retirada"];
+const CONFIGS = ["cardapio", "entregador", "pix", "retirada", "loja"];
+const LIMITES_PADRAO = { macarronada: 50, suco: 15, "creme-cupuacu": 15, "creme-maracuja": 15 };
+const LOJA_PADRAO = { aberto: true, aviso: "", cicloInicio: 0, limites: LIMITES_PADRAO };
+// macarronadas dividem um limite só, os sucos também; cada sobremesa tem o seu
+const poolDe = (m) => (m.cat === "sobremesa" ? m.id : m.cat || "macarronada");
+const ROTULO_POOL = { macarronada: "macarronadas", suco: "garrafas de suco" };
 const SESSAO_MS = 1000 * 60 * 60 * 24 * 30; // 30 dias
 const ID_OK = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -71,10 +76,48 @@ async function marcarVersao(s, qual) {
 async function versao(s, qual) {
   return (await s.get(qual)) || "0";
 }
-async function listarPedidos(s) {
+let memoria = { v: "", pedidos: null };
+async function listarPedidos(s, v) {
+  // guarda a lista na memória enquanto a versão não mudar (evita reler tudo a cada consulta)
+  if (v && memoria.v === v && memoria.pedidos) return memoria.pedidos;
   const { blobs } = await s.list({ prefix: "pedidos/" });
   const docs = await Promise.all(blobs.map((b) => lerDoc(s, b.key)));
-  return docs.filter(Boolean);
+  const lista = docs.filter(Boolean);
+  if (v) memoria = { v, pedidos: lista };
+  return lista;
+}
+// situação dos pedidos do ciclo: aberto à mão pelo dono e ainda com produto disponível
+async function menuAtual(s) {
+  const c = await lerDoc(s, "config/cardapio");
+  return c && Array.isArray(c.itens) && c.itens.length ? c.itens : MENU_PADRAO;
+}
+async function estadoLoja(s, menu) {
+  const v = await versao(s, "meta/versao");
+  const cfg = { ...LOJA_PADRAO, ...((await lerDoc(s, "config/loja")) || {}) };
+  const limites = { ...(cfg.limites && typeof cfg.limites === "object" ? cfg.limites : LIMITES_PADRAO) };
+  menu = menu || (await menuAtual(s));
+  const pedidos = await listarPedidos(s, v);
+  const porNome = new Map(menu.map((m) => [String(m.nome).trim().toLowerCase(), m]));
+  const usados = {};
+  for (const o of pedidos) {
+    if (o.status === "cancelado" || !(Number(o.criadoEm) >= Number(cfg.cicloInicio || 0))) continue;
+    for (const i of o.itens || []) {
+      const m = porNome.get(String(i.nome).trim().toLowerCase()) || { cat: i.cat, id: i.nome };
+      const k = poolDe(m);
+      usados[k] = (usados[k] || 0) + (Number(i.qtd) || 0);
+    }
+  }
+  const pools = {};
+  for (const m of menu) {
+    const k = poolDe(m);
+    const max = Math.max(0, Math.floor(Number(limites[k]) || 0));
+    pools[k] = { max, usados: usados[k] || 0, restantes: max > 0 ? Math.max(0, max - (usados[k] || 0)) : null };
+  }
+  const restantes = {};
+  for (const m of menu) restantes[m.id] = pools[poolDe(m)].restantes;
+  const ativos = menu.filter((m) => m.ativo !== false);
+  const esgotado = ativos.length > 0 && ativos.every((m) => restantes[m.id] === 0);
+  return { aberto: !!cfg.aberto && !esgotado, esgotado, aviso: txt(cfg.aviso, 300), restantes, pools };
 }
 const txt = (v, max) => String(v == null ? "" : v).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "").trim().slice(0, max);
 
@@ -103,8 +146,10 @@ export default async (req) => {
         lerDoc(s, "config/retirada"),
       ]);
       const itens = cardapio && Array.isArray(cardapio.itens) && cardapio.itens.length ? cardapio.itens : MENU_PADRAO;
+      const loja = await estadoLoja(s, itens);
       return json({
-        itens: itens.map((i) => ({ id: i.id, nome: i.nome, desc: i.desc || "", preco: i.preco, cat: i.cat, ativo: i.ativo !== false })),
+        loja: { aberto: loja.aberto, esgotado: loja.esgotado, aviso: loja.aviso },
+        itens: itens.map((i) => ({ id: i.id, nome: i.nome, desc: i.desc || "", preco: i.preco, cat: i.cat, ativo: i.ativo !== false, restantes: loja.restantes[i.id] ?? null })),
         pix: pix || PIX_PADRAO,
         retirada: (retirada && retirada.texto) || "",
       });
@@ -119,6 +164,10 @@ export default async (req) => {
       if (b.site) return json({ ok: true, numero: 0 }); // campo-isca: robôs preenchem, pessoas não
       if (!(await limitarIp(s, req))) return json({ erro: "Muitas tentativas. Espere um minuto." }, 429);
 
+      const menuP = await menuAtual(s);
+      const loja = await estadoLoja(s, menuP);
+      if (!loja.aberto) return json({ erro: loja.esgotado ? "Os pedidos desta rodada se esgotaram." : "Os pedidos estão encerrados no momento.", encerrado: true }, 409);
+
       const cliente = txt(b.cliente, 80);
       const telefone = txt(b.telefone, 30);
       const tipo = b.tipo === "retirada" ? "retirada" : "entrega";
@@ -127,8 +176,7 @@ export default async (req) => {
       const mapa = tipo === "entrega" ? txt(b.mapa, 200) : "";
       if (tipo === "entrega" && !endereco && !mapa) return json({ erro: "Informe o endereço ou a localização." }, 400);
 
-      const cardapio = await lerDoc(s, "config/cardapio");
-      const menu = cardapio && Array.isArray(cardapio.itens) && cardapio.itens.length ? cardapio.itens : MENU_PADRAO;
+      const menu = menuP;
       const porNome = new Map(menu.map((m) => [String(m.nome).trim().toLowerCase(), m]));
       const brutoItens = Array.isArray(b.itens) ? b.itens.slice(0, 30) : [];
       const itens = [];
@@ -136,9 +184,22 @@ export default async (req) => {
         const m = porNome.get(String(i && i.nome).trim().toLowerCase());
         const qtd = Math.floor(Number(i && i.qtd));
         if (!m || m.ativo === false || !(qtd >= 1) || qtd > 50) return json({ erro: "Há um item indisponível no pedido. Recarregue a página." }, 400);
-        itens.push({ nome: m.nome, preco: Number(m.preco), qtd, cat: m.cat || "macarronada" });
+        itens.push({ id: m.id, nome: m.nome, preco: Number(m.preco), qtd, cat: m.cat || "macarronada" });
       }
       if (!itens.length) return json({ erro: "Escolha pelo menos um item." }, 400);
+      // confere o que ainda resta de cada produto
+      const pedidoPool = {};
+      for (const i of itens) {
+        const k = poolDe(porNome.get(i.nome.toLowerCase()));
+        pedidoPool[k] = (pedidoPool[k] || 0) + i.qtd;
+      }
+      for (const [k, qtd] of Object.entries(pedidoPool)) {
+        const r = loja.pools[k] ? loja.pools[k].restantes : null;
+        if (r !== null && qtd > r) {
+          const nome = ROTULO_POOL[k] || (menu.find((m) => m.id === k) || {}).nome || k;
+          return json({ erro: r === 0 ? `${nome}: esgotado.` : `Só restam ${r} de ${nome}. Diminua a quantidade.`, esgotado: true }, 409);
+        }
+      }
       const total = Math.round(itens.reduce((t, i) => t + i.preco * i.qtd, 0) * 100) / 100;
       const agora = Date.now();
       const id = agora.toString(36) + randomBytes(3).toString("hex");
@@ -178,12 +239,13 @@ export default async (req) => {
       const v = await versao(s, "meta/versao");
       const fv = await versao(s, "meta/fotos");
       if (url.searchParams.get("v") === v + "|" + fv) return json({ igual: true });
-      const [pedidos, cardapio, entregador, pix, retirada] = await Promise.all([
-        listarPedidos(s),
+      const [pedidos, cardapio, entregador, pix, retirada, loja] = await Promise.all([
+        listarPedidos(s, v),
         lerDoc(s, "config/cardapio"),
         lerDoc(s, "config/entregador"),
         lerDoc(s, "config/pix"),
         lerDoc(s, "config/retirada"),
+        lerDoc(s, "config/loja"),
       ]);
       let lista = pedidos;
       if (papel === "entregador") {
@@ -193,7 +255,9 @@ export default async (req) => {
         v: v + "|" + fv,
         papel,
         pedidos: lista,
-        config: papel === "equipe" ? { cardapio, entregador, pix, retirada } : { entregador },
+        config: papel === "equipe"
+          ? { cardapio: cardapio || { itens: MENU_PADRAO }, entregador, pix: pix || PIX_PADRAO, retirada, loja }
+          : { entregador },
       });
     }
 
