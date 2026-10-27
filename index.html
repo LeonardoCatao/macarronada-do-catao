@@ -152,6 +152,8 @@ footer a{color:inherit}
 .sheet h2{margin:0;font:700 1.8rem/1.1 var(--f-display);text-transform:uppercase}
 .sheet textarea{min-height:140px;font-family:var(--f-mono);font-size:13px}
 @media (prefers-reduced-motion:no-preference){.prod{transition:border-color .15s}}
+.prod.esg{opacity:.55}
+.qty button[disabled]{opacity:.35;cursor:default}
 </style>
 </head>
 <body>
@@ -167,6 +169,7 @@ footer a{color:inherit}
     <p>Escolha seus itens e envie o pedido. Depois é só pagar no Pix e mandar o comprovante pelo WhatsApp.</p>
   </div>
 
+  <div id="aviso-loja" class="note" hidden style="margin-top:14px"></div>
   <main>
     <section class="sec" aria-labelledby="t-itens">
       <h2 id="t-itens"><span class="n">1</span>Escolha seus itens</h2>
@@ -311,6 +314,16 @@ function pixValor(c,total){
   return b+crc16(b);
 }
 var PIX_VALIDO=pixOk(CFG.pixCopiaCola);
+var LOJA={aberto:true,aviso:'',esgotado:false};
+function poolDe(m){return m.cat==='Sobremesas'?m.id:m.cat}
+function usadoNoPool(m){var k=poolDe(m);return MENU.reduce(function(a,x){return a+(poolDe(x)===k?(cart[x.id]||0):0)},0)}
+function mostrarLoja(){
+  var el=$('#aviso-loja'),btn=$('#b-enviar'),partes=[];
+  if(!LOJA.aberto)partes.push(LOJA.esgotado?'<b>Esgotado! Todos os produtos desta rodada acabaram.</b>':'<b>Pedidos encerrados no momento.</b>');
+  if(LOJA.aviso)partes.push(esc(LOJA.aviso));
+  el.innerHTML=partes.join('<br>');el.hidden=!partes.length;
+  if(btn){btn.disabled=!LOJA.aberto;btn.textContent=LOJA.aberto?'Enviar pedido':'Pedidos encerrados'}
+}
 var IMG={'trad-ind':'img/tradicional.webp','trad-fam':'img/tradicional.webp','pimenta-ind':'img/pimenta.webp','pimenta-fam':'img/pimenta.webp','creme-cupuacu':'img/cupuacu.webp','creme-maracuja':'img/maracuja.webp','eita-300':'img/eita.webp','eita-500':'img/eita.webp'};
 var GRUPO={macarronada:'Macarronadas',sobremesa:'Sobremesas',suco:'Sucos'};
 function carregarLoja(){
@@ -320,12 +333,13 @@ function carregarLoja(){
     var base={};MENU.forEach(function(m){base[m.id]=m});
     var novo=d.itens.filter(function(i){return i.ativo!==false}).map(function(i){
       var o=base[i.id]||{};
-      return {id:i.id,cat:GRUPO[i.cat]||o.cat||'Macarronadas',nome:i.nome,desc:i.desc||o.desc||'',preco:Number(i.preco)||0,img:IMG[i.id]||'img/icone.png'};
+      return {id:i.id,cat:GRUPO[i.cat]||o.cat||'Macarronadas',nome:i.nome,desc:i.desc||o.desc||'',preco:Number(i.preco)||0,img:IMG[i.id]||'img/icone.png',restantes:(i.restantes==null?null:Number(i.restantes))};
     });
     if(novo.length)MENU=novo;
     if(d.pix&&d.pix.chave)CFG.pixChave=d.pix.chave;
     if(d.pix&&d.pix.copia){CFG.pixCopiaCola=d.pix.copia;PIX_VALIDO=pixOk(d.pix.copia)}
     if(typeof d.retirada==='string')CFG.retirada=d.retirada;
+    if(d.loja){LOJA=d.loja;mostrarLoja()}
   }).catch(function(){clearTimeout(t)});
 }
 
@@ -360,14 +374,16 @@ function renderMenu(){
   var grupos=[];MENU.forEach(function(m){if(grupos.indexOf(m.cat)<0)grupos.push(m.cat)});
   $('#menu').innerHTML=grupos.map(function(g){
     return '<h3 class="grp">'+esc(g)+'</h3><div class="menu">'+MENU.filter(function(m){return m.cat===g}).map(function(m,i){
-      var q=cart[m.id]||0;
-      return '<article class="prod'+(q?' on':'')+'" data-id="'+m.id+'"><div class="ph"><img src="'+m.img+'" alt="'+esc(m.nome)+'" loading="'+(g==='Macarronadas'?'eager':'lazy')+'" decoding="async">'+(q?'<span class="sel">'+q+'</span>':'')+'</div>'+
-        '<div class="bd"><div class="nm">'+esc(m.nome)+'</div><div class="ds">'+esc(m.desc)+'</div><div class="pr">'+brl(m.preco)+'</div>'+
-        '<div class="qty" role="group" aria-label="Quantidade de '+esc(m.nome)+'"><button type="button" data-act="dec" data-id="'+m.id+'" aria-label="Diminuir">−</button><output>'+q+'</output><button type="button" data-act="inc" data-id="'+m.id+'" aria-label="Aumentar">+</button></div></div></article>';
+      var q=cart[m.id]||0,esg=m.restantes===0,pouco=m.restantes!=null&&m.restantes>0&&m.restantes<=10;
+      return '<article class="prod'+(q?' on':'')+(esg?' esg':'')+'" data-id="'+m.id+'"><div class="ph"><img src="'+m.img+'" alt="'+esc(m.nome)+'" loading="'+(g==='Macarronadas'?'eager':'lazy')+'" decoding="async">'+(esg?'<span class="sel" style="background:#6E0F15;color:#FFF6EA">Esgotado</span>':(q?'<span class="sel">'+q+'</span>':''))+'</div>'+
+        '<div class="bd"><div class="nm">'+esc(m.nome)+'</div><div class="ds">'+esc(m.desc)+'</div>'+(pouco?'<div class="ds" style="color:var(--molho);font-weight:700">Restam '+m.restantes+'</div>':'')+'<div class="pr">'+brl(m.preco)+'</div>'+
+        '<div class="qty" role="group" aria-label="Quantidade de '+esc(m.nome)+'"><button type="button" data-act="dec" data-id="'+m.id+'" aria-label="Diminuir">−</button><output>'+q+'</output><button type="button" data-act="inc" data-id="'+m.id+'" aria-label="Aumentar"'+(esg?' disabled':'')+'>+</button></div></div></article>';
     }).join('')+'</div>';
   }).join('');
 }
 function setQtd(id,d){
+  var mi=MENU.filter(function(x){return x.id===id})[0];
+  if(d>0&&mi&&mi.restantes!=null&&usadoNoPool(mi)>=mi.restantes){toast(mi.restantes===0?'Esgotado.':'Só restam '+mi.restantes+' deste produto.');return}
   cart[id]=Math.max(0,Math.min(20,(cart[id]||0)+d));
   var el=document.querySelector('.prod[data-id="'+id+'"]');
   if(el){
@@ -483,16 +499,17 @@ async function enviar(){
   guardarCliente();
   var btn=$('#b-enviar');btn.disabled=true;btn.textContent='Enviando…';
   var corpo={cliente:F.nome.value.trim(),telefone:F.tel.value.trim(),tipo:tipo,endereco:F.end.value.trim(),mapa:geo,pagamento:pagto,troco:F.troco.value||'',obs:F.obs.value.trim(),site:($('#f-site')||{}).value||'',itens:itens().map(function(i){return {nome:i.nome,qtd:i.qtd}})};
-  var ok=null,falhou='';
+  var ok=null,falhou='',encerrado=false;
   try{
     var c=new AbortController(),t=setTimeout(function(){c.abort()},12000);
     var r=await fetch('/api/pedido',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(corpo),signal:c.signal});
     clearTimeout(t);
     var d=await r.json().catch(function(){return {}});
-    if(r.ok&&d.ok)ok=d;else if(r.status>=400&&r.status<500)falhou=d.erro||'Não foi possível enviar.';
+    if(r.ok&&d.ok)ok=d;else if(r.status>=400&&r.status<500){falhou=d.erro||'Não foi possível enviar.';encerrado=!!d.encerrado}
   }catch(e){}
   btn.disabled=false;btn.textContent='Enviar pedido';
-  if(falhou){$('#msg').textContent=falhou;$('#msg').scrollIntoView({block:'center',behavior:'smooth'});return}
+  if(encerrado){LOJA.aberto=false;LOJA.aviso=LOJA.aviso||'';mostrarLoja();$('#msg').textContent=falhou;window.scrollTo({top:0,behavior:'smooth'});return}
+  if(falhou){carregarLoja().then(function(){renderMenu();atualizar();mostrarLoja()});$('#msg').textContent=falhou;$('#msg').scrollIntoView({block:'center',behavior:'smooth'});return}
   if(!ok){enviarPorWhatsapp('Não conseguimos registrar o pedido pelo site agora.');return}
   var num=digits(CFG.whatsapp),val=ok.total||subtotal();
   var aviso='Recebemos o seu pedido, '+F.nome.value.trim().split(' ')[0]+'! Agora pague o Pix de '+brl(val)+' e mande o comprovante pelo WhatsApp para confirmarmos.';
