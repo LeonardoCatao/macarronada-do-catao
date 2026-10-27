@@ -1,0 +1,8 @@
+Macarronada do Catao - site de pedidos + sistema
+
+public/index.html   pagina do cliente
+public/admin/       sistema da equipe e do entregador (/admin), com senha
+netlify/functions/  servidor que guarda os pedidos (Netlify Blobs)
+
+Variaveis no Netlify (Project configuration > Environment variables):
+  SENHA_EQUIPE, SENHA_ENTREGADOR, TOKEN_SECRET
